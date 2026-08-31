@@ -1,0 +1,5 @@
+.build/
+README.formatted.pdf
+outputs/
+tmp/
+.DS_Store
