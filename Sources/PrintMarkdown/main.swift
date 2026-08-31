@@ -450,6 +450,55 @@ func measuredTextSize(_ text: String, font: NSFont, constrainedTo width: CGFloat
     return CGSize(width: ceil(rect.width), height: ceil(rect.height))
 }
 
+func unbreakableASCIISegments(in text: String) -> [String] {
+    var segments: [String] = []
+    var current = ""
+
+    for scalar in text.unicodeScalars {
+        if scalar.isASCII && !CharacterSet.whitespacesAndNewlines.contains(scalar) {
+            current.unicodeScalars.append(scalar)
+        } else if !current.isEmpty {
+            segments.append(current)
+            current = ""
+        }
+    }
+
+    if !current.isEmpty {
+        segments.append(current)
+    }
+    return segments
+}
+
+func minimumCellWidth(_ text: String, font: NSFont, horizontalPadding: CGFloat, fallback: CGFloat) -> CGFloat {
+    let segmentWidths = unbreakableASCIISegments(in: text).map {
+        measuredTextSize($0, font: font).width + horizontalPadding * 2
+    }
+    return max(fallback, segmentWidths.max() ?? fallback)
+}
+
+func distributedColumnWidths(naturalWidths: [CGFloat], minimumWidths: [CGFloat], availableWidth: CGFloat) -> [CGFloat] {
+    let naturalTotal = naturalWidths.reduce(0, +)
+    if naturalTotal <= availableWidth {
+        return naturalWidths.map(floor)
+    }
+
+    let minimumTotal = minimumWidths.reduce(0, +)
+    if minimumTotal >= availableWidth {
+        return minimumWidths.map(ceil)
+    }
+
+    let extraAvailable = availableWidth - minimumTotal
+    let flexes = zip(naturalWidths, minimumWidths).map { max(0, $0 - $1) }
+    let flexTotal = flexes.reduce(0, +)
+    guard flexTotal > 0 else {
+        return minimumWidths.map(ceil)
+    }
+
+    return zip(minimumWidths, flexes).map { minimumWidth, flex in
+        floor(minimumWidth + extraAvailable * (flex / flexTotal))
+    }
+}
+
 func writeTableImage(headers: [String], rows: [[String]], options: Options) throws -> URL {
     let columnCount = headers.count
     let pageContentWidth = max(120, pageSize(for: options).width - options.margin * 2)
@@ -1117,6 +1166,10 @@ func textHeight(_ attributed: NSAttributedString, width: CGFloat) -> CGFloat {
     return ceil(size.height)
 }
 
+func tableCellText(_ text: String, font: NSFont) -> NSAttributedString {
+    attributedText(text, font: font, color: textColor(31, 41, 51), lineHeightMultiple: 1.25)
+}
+
 func drawAttributed(_ attributed: NSAttributedString, in rect: CGRect, context: CGContext) {
     let path = CGMutablePath()
     path.addRect(rect)
@@ -1136,10 +1189,15 @@ func tableLayout(headers: [String], rows: [[String]], options: Options, contentW
     let minimumColumnWidth: CGFloat = 46
 
     var naturalWidths = Array(repeating: minimumColumnWidth, count: columnCount)
+    var minimumWidths = Array(repeating: minimumColumnWidth, count: columnCount)
     for columnIndex in 0..<columnCount {
         naturalWidths[columnIndex] = max(
             naturalWidths[columnIndex],
             measuredTextSize(headers[columnIndex], font: header).width + horizontalPadding * 2
+        )
+        minimumWidths[columnIndex] = max(
+            minimumWidths[columnIndex],
+            minimumCellWidth(headers[columnIndex], font: header, horizontalPadding: horizontalPadding, fallback: minimumColumnWidth)
         )
         for row in rows {
             let cell = columnIndex < row.count ? row[columnIndex] : ""
@@ -1147,19 +1205,25 @@ func tableLayout(headers: [String], rows: [[String]], options: Options, contentW
                 naturalWidths[columnIndex],
                 measuredTextSize(cell, font: body).width + horizontalPadding * 2
             )
+            minimumWidths[columnIndex] = max(
+                minimumWidths[columnIndex],
+                minimumCellWidth(cell, font: body, horizontalPadding: horizontalPadding, fallback: minimumColumnWidth)
+            )
         }
     }
 
-    let naturalTotal = naturalWidths.reduce(0, +)
-    let scale = naturalTotal > contentWidth ? contentWidth / naturalTotal : 1
-    let columnWidths = naturalWidths.map { max(minimumColumnWidth, floor($0 * scale)) }
+    let columnWidths = distributedColumnWidths(
+        naturalWidths: naturalWidths,
+        minimumWidths: minimumWidths,
+        availableWidth: contentWidth
+    )
 
     func heightForRow(_ cells: [String], font: NSFont) -> CGFloat {
         var height: CGFloat = 0
         for columnIndex in 0..<columnCount {
             let cell = columnIndex < cells.count ? cells[columnIndex] : ""
             let width = max(12, columnWidths[columnIndex] - horizontalPadding * 2)
-            height = max(height, measuredTextSize(cell, font: font, constrainedTo: width).height)
+            height = max(height, textHeight(tableCellText(cell, font: font), width: width))
         }
         return ceil(height + verticalPadding * 2)
     }
@@ -1169,23 +1233,40 @@ func tableLayout(headers: [String], rows: [[String]], options: Options, contentW
     return (columnWidths, rowHeights, rowHeights.reduce(0, +))
 }
 
-func drawTable(headers: [String], rows: [[String]], atTopY topY: CGFloat, contentRect: CGRect, options: Options, context: CGContext) {
-    let layout = tableLayout(headers: headers, rows: rows, options: options, contentWidth: contentRect.width)
-    let allRows = [headers] + rows
+func drawTableRows(
+    headers: [String],
+    rows: [[String]],
+    layout: (columnWidths: [CGFloat], rowHeights: [CGFloat], totalHeight: CGFloat),
+    bodyRowRange: Range<Int>,
+    includesHeader: Bool,
+    atTopY topY: CGFloat,
+    contentRect: CGRect,
+    options: Options,
+    context: CGContext
+) {
     let fontSize = max(8, options.fontSize * 0.92)
     let body = NSFont.systemFont(ofSize: fontSize)
     let header = NSFont.boldSystemFont(ofSize: fontSize)
     let horizontalPadding: CGFloat = 8
-    let verticalPadding: CGFloat = 5
+    let verticalPadding: CGFloat = 7
     let headerFill = NSColor(red: 0.93, green: 0.95, blue: 0.98, alpha: 1).cgColor
     let alternateFill = NSColor(red: 0.98, green: 0.99, blue: 1, alpha: 1).cgColor
     let borderColor = NSColor(red: 0.82, green: 0.86, blue: 0.91, alpha: 1).cgColor
     var rowTop = topY
+    var displayRows: [(cells: [String], height: CGFloat, isHeader: Bool, bodyIndex: Int?)] = []
 
-    for rowIndex in 0..<allRows.count {
-        let rowHeight = layout.rowHeights[rowIndex]
+    if includesHeader {
+        displayRows.append((headers, layout.rowHeights[0], true, nil))
+    }
+    for bodyIndex in bodyRowRange {
+        displayRows.append((rows[bodyIndex], layout.rowHeights[bodyIndex + 1], false, bodyIndex))
+    }
+
+    for row in displayRows {
+        let rowHeight = row.height
         let rowRect = CGRect(x: contentRect.minX, y: rowTop - rowHeight, width: layout.columnWidths.reduce(0, +), height: rowHeight)
-        context.setFillColor(rowIndex == 0 ? headerFill : (rowIndex.isMultiple(of: 2) ? alternateFill : NSColor.white.cgColor))
+        let isAlternateBodyRow = row.bodyIndex.map { !$0.isMultiple(of: 2) } ?? false
+        context.setFillColor(row.isHeader ? headerFill : (isAlternateBodyRow ? alternateFill : NSColor.white.cgColor))
         context.fill(rowRect)
 
         var x = contentRect.minX
@@ -1196,15 +1277,30 @@ func drawTable(headers: [String], rows: [[String]], atTopY topY: CGFloat, conten
             context.setLineWidth(0.8)
             context.stroke(cellRect)
 
-            let cell = columnIndex < allRows[rowIndex].count ? allRows[rowIndex][columnIndex] : ""
-            let font = rowIndex == 0 ? header : body
-            let text = attributedText(cell, font: font, color: textColor(31, 41, 51), lineHeightMultiple: 1.25)
+            let cell = columnIndex < row.cells.count ? row.cells[columnIndex] : ""
+            let font = row.isHeader ? header : body
+            let text = tableCellText(cell, font: font)
             let textRect = cellRect.insetBy(dx: horizontalPadding, dy: verticalPadding)
             drawAttributed(text, in: textRect, context: context)
             x += columnWidth
         }
         rowTop -= rowHeight
     }
+}
+
+func drawTable(headers: [String], rows: [[String]], atTopY topY: CGFloat, contentRect: CGRect, options: Options, context: CGContext) {
+    let layout = tableLayout(headers: headers, rows: rows, options: options, contentWidth: contentRect.width)
+    drawTableRows(
+        headers: headers,
+        rows: rows,
+        layout: layout,
+        bodyRowRange: rows.indices,
+        includesHeader: true,
+        atTopY: topY,
+        contentRect: contentRect,
+        options: options,
+        context: context
+    )
 }
 
 func attributedString(from html: String, baseURL: URL) throws -> NSAttributedString {
@@ -1447,10 +1543,56 @@ func renderPDF(blocks: [MarkdownBlock], outputURL: URL, options: Options) throws
 
         case .table(let headers, let rows):
             let layout = tableLayout(headers: headers, rows: rows, options: options, contentWidth: contentRect.width)
-            let totalHeight = layout.totalHeight + 14
-            ensureSpace(totalHeight)
-            drawTable(headers: headers, rows: rows, atTopY: currentTopY, contentRect: contentRect, options: options, context: context)
-            currentTopY -= totalHeight
+            let spacingAfter: CGFloat = 14
+            let headerHeight = layout.rowHeights[0]
+            var nextRowIndex = 0
+
+            repeat {
+                if !pageIsOpen {
+                    beginPage()
+                }
+
+                var availableHeight = currentTopY - contentRect.minY
+                if availableHeight < headerHeight + options.fontSize * 2 {
+                    endPageIfNeeded()
+                    beginPage()
+                    availableHeight = currentTopY - contentRect.minY
+                }
+
+                var usedHeight = headerHeight
+                var endRowIndex = nextRowIndex
+                while endRowIndex < rows.count {
+                    let rowHeight = layout.rowHeights[endRowIndex + 1]
+                    if usedHeight + rowHeight > availableHeight, endRowIndex > nextRowIndex {
+                        break
+                    }
+                    usedHeight += rowHeight
+                    endRowIndex += 1
+                    if usedHeight >= availableHeight {
+                        break
+                    }
+                }
+
+                drawTableRows(
+                    headers: headers,
+                    rows: rows,
+                    layout: layout,
+                    bodyRowRange: nextRowIndex..<endRowIndex,
+                    includesHeader: true,
+                    atTopY: currentTopY,
+                    contentRect: contentRect,
+                    options: options,
+                    context: context
+                )
+                currentTopY -= usedHeight
+                nextRowIndex = endRowIndex
+
+                if nextRowIndex < rows.count {
+                    endPageIfNeeded()
+                }
+            } while nextRowIndex < rows.count
+
+            currentTopY = max(contentRect.minY, currentTopY - spacingAfter)
 
         case .horizontalRule:
             ensureSpace(18)
