@@ -82,6 +82,7 @@ struct Options {
     var theme = Theme.clean
     var fontSize: CGFloat = 13
     var margin: CGFloat = 46
+    var pageNumbers = true
     var shouldPrint = false
     var dryRun = false
 }
@@ -138,6 +139,7 @@ func printUsage() {
       --theme NAME              clean, serif, compact. Default: clean
       --font-size POINTS        Base font size. Default: 13
       --margin POINTS           Page margin. Default: 46
+      --no-page-numbers         Omit n/m page numbers from multi-page PDFs
       --title TEXT              Override document title
       --keep-html PATH          Also save the generated HTML
       --dry-run                 Create the PDF but do not print
@@ -159,6 +161,8 @@ func parseOptions(_ arguments: [String]) throws -> Options {
             exit(0)
         } else if argument == "--dry-run" {
             options.dryRun = true
+        } else if argument == "--no-page-numbers" {
+            options.pageNumbers = false
         } else if argument == "--print" {
             options.shouldPrint = true
         } else if argument.hasPrefix("--") {
@@ -1058,6 +1062,16 @@ func pageSize(for options: Options) -> NSSize {
     }
 }
 
+func contentRect(for options: Options, pageRect: CGRect) -> CGRect {
+    let bottomMargin = options.pageNumbers ? max(options.margin, 28) : options.margin
+    return CGRect(
+        x: options.margin,
+        y: bottomMargin,
+        width: pageRect.width - options.margin * 2,
+        height: pageRect.height - options.margin - bottomMargin
+    )
+}
+
 func bodyFont(for options: Options) -> NSFont {
     switch options.theme {
     case .clean, .compact:
@@ -1321,7 +1335,7 @@ func renderPDF(html: String, baseURL: URL, outputURL: URL, options: Options) thr
     let attributedText = try attributedString(from: html, baseURL: baseURL)
     let pageSize = pageSize(for: options)
     let pageRect = CGRect(origin: .zero, size: pageSize)
-    let contentRect = pageRect.insetBy(dx: options.margin, dy: options.margin)
+    let contentRect = contentRect(for: options, pageRect: pageRect)
 
     guard contentRect.width > 0, contentRect.height > 0 else {
         throw AppError.renderFailed("page margin is larger than the paper size.")
@@ -1370,7 +1384,7 @@ func renderPDF(html: String, baseURL: URL, outputURL: URL, options: Options) thr
 func renderPDF(blocks: [MarkdownBlock], outputURL: URL, options: Options) throws {
     let pageSize = pageSize(for: options)
     let pageRect = CGRect(origin: .zero, size: pageSize)
-    let contentRect = pageRect.insetBy(dx: options.margin, dy: options.margin)
+    let contentRect = contentRect(for: options, pageRect: pageRect)
 
     guard contentRect.width > 0, contentRect.height > 0 else {
         throw AppError.renderFailed("page margin is larger than the paper size.")
@@ -1613,6 +1627,72 @@ func renderPDF(blocks: [MarkdownBlock], outputURL: URL, options: Options) throws
     }
 }
 
+func addPageNumbersIfNeeded(to outputURL: URL, options: Options) throws {
+    guard options.pageNumbers else {
+        return
+    }
+    guard let document = CGPDFDocument(outputURL as CFURL) else {
+        throw AppError.renderFailed("could not reopen the generated PDF to add page numbers.")
+    }
+    guard document.numberOfPages > 1 else {
+        return
+    }
+
+    let outputData = NSMutableData()
+    guard let consumer = CGDataConsumer(data: outputData as CFMutableData) else {
+        throw AppError.renderFailed("could not create numbered PDF data consumer.")
+    }
+
+    guard let firstPage = document.page(at: 1) else {
+        throw AppError.renderFailed("could not read the first generated PDF page.")
+    }
+    var mediaBox = firstPage.getBoxRect(.mediaBox)
+    guard let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+        throw AppError.renderFailed("could not create numbered PDF context.")
+    }
+
+    let footerFontSize = max(8, min(10, options.fontSize * 0.72))
+    let footerFont = NSFont.systemFont(ofSize: footerFontSize)
+    let footerColor = textColor(100, 116, 139)
+    let bottomMargin = max(options.margin, 28)
+    let footerBaseline = max(8, (bottomMargin - footerFontSize) / 2)
+
+    for pageNumber in 1...document.numberOfPages {
+        guard let page = document.page(at: pageNumber) else {
+            throw AppError.renderFailed("could not read generated PDF page \(pageNumber).")
+        }
+
+        var pageMediaBox = page.getBoxRect(.mediaBox)
+        context.beginPDFPage([
+            kCGPDFContextMediaBox as String: NSData(bytes: &pageMediaBox, length: MemoryLayout<CGRect>.size)
+        ] as CFDictionary)
+        context.drawPDFPage(page)
+
+        let label = NSAttributedString(
+            string: "\(pageNumber)/\(document.numberOfPages)",
+            attributes: [
+                .font: footerFont,
+                .foregroundColor: footerColor
+            ]
+        )
+        let line = CTLineCreateWithAttributedString(label)
+        let lineWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        context.textMatrix = .identity
+        context.textPosition = CGPoint(
+            x: pageMediaBox.midX - lineWidth / 2,
+            y: pageMediaBox.minY + footerBaseline
+        )
+        CTLineDraw(line, context)
+        context.endPDFPage()
+    }
+
+    context.closePDF()
+
+    guard outputData.write(to: outputURL, atomically: true) else {
+        throw AppError.cannotWriteOutput(outputURL.path)
+    }
+}
+
 func defaultOutputURL(inputURL: URL, options: Options) -> URL {
     if let outputPDF = options.outputPDF {
         return outputPDF
@@ -1709,6 +1789,7 @@ func run() throws {
     let outputURL = defaultOutputURL(inputURL: inputURL, options: options)
     try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
     try renderPDF(blocks: blocks, outputURL: outputURL, options: options)
+    try addPageNumbersIfNeeded(to: outputURL, options: options)
 
     if options.dryRun || !options.shouldPrint {
         print("Formatted PDF created: \(outputURL.path)")

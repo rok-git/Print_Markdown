@@ -9,6 +9,7 @@ Markdown で書いたメモ、議事録、手順書を、読みやすい PDF に
 - 表組み中の画像記法は未対応
 - `clean`, `serif`, `compact` のテーマ
 - A4, Letter, B5 と縦横指定
+- 複数ページの PDF に `n/m` 形式のページ番号を表示
 - PDF の保存だけ、または印刷まで実行
 - macOS の `lp` にプリンタ名や印刷オプションを渡せる
 - Finder クイックアクション用スクリプトで設定ファイルを読み込んで実行可能
@@ -108,6 +109,7 @@ swift run print-markdown input.md \
 - `--theme NAME`: `clean`, `serif`, `compact`
 - `--font-size POINTS`: 基本文字サイズ
 - `--margin POINTS`: ページ余白
+- `--no-page-numbers`: 複数ページ PDF のページ番号を表示しない
 - `--title TEXT`: PDF 内 HTML のタイトル
 - `--keep-html PATH`: 生成した HTML も保存
 - `--dry-run`: PDF を作るだけで印刷しない

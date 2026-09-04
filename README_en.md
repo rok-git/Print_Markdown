@@ -9,6 +9,7 @@ A macOS CLI tool that formats Markdown notes, meeting minutes, and procedure doc
 - Images inside Markdown table cells are not currently supported
 - `clean`, `serif`, and `compact` themes
 - A4, Letter, and B5 paper sizes with portrait or landscape orientation
+- `n/m` page numbers on multi-page PDFs
 - Save PDFs only, or send them to a printer
 - Pass printer names and printer-specific options to macOS `lp`
 - Use a config file through the Finder Quick Action helper script
@@ -108,6 +109,7 @@ swift run print-markdown input.md \
 - `--theme NAME`: `clean`, `serif`, `compact`
 - `--font-size POINTS`: Base font size
 - `--margin POINTS`: Page margin
+- `--no-page-numbers`: Omit page numbers from multi-page PDFs
 - `--title TEXT`: Title used in generated HTML metadata
 - `--keep-html PATH`: Also save the generated HTML
 - `--dry-run`: Create the PDF without printing it
